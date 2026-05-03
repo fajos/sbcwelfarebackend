@@ -22,7 +22,7 @@ const corsOptions = {
 };
 
 // Apply CORS middleware
-app.use(cors(corsOptions));x
+app.use(cors(corsOptions));
 
 // Handle preflight requests
 app.options('*', cors(corsOptions));
