@@ -10,13 +10,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// MongoDB Connection
-mongoose.connect(process.env.MONGODB_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-.then(() => console.log('✅ Connected to MongoDB Atlas'))
-.catch(err => console.error('❌ MongoDB connection error:', err));
+// MongoDB Connection - FIXED (removed deprecated options)
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/saints_welfare';
+
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log('✅ Connected to MongoDB Atlas'))
+  .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // Member Schema
 const memberSchema = new mongoose.Schema({
@@ -46,6 +45,7 @@ app.get('/api/members', async (req, res) => {
     const members = await Member.find().sort({ createdAt: -1 });
     res.json(members);
   } catch (error) {
+    console.error('Error fetching members:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -57,6 +57,7 @@ app.post('/api/members', async (req, res) => {
     const savedMember = await member.save();
     res.status(201).json(savedMember);
   } catch (error) {
+    console.error('Error saving member:', error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -68,6 +69,7 @@ app.get('/api/members/:id', async (req, res) => {
     if (!member) return res.status(404).json({ message: 'Member not found' });
     res.json(member);
   } catch (error) {
+    console.error('Error fetching member:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -78,10 +80,12 @@ app.put('/api/members/:id', async (req, res) => {
     const updatedMember = await Member.findByIdAndUpdate(
       req.params.id,
       { ...req.body, updatedAt: Date.now() },
-      { new: true }
+      { new: true, runValidators: true }
     );
+    if (!updatedMember) return res.status(404).json({ message: 'Member not found' });
     res.json(updatedMember);
   } catch (error) {
+    console.error('Error updating member:', error);
     res.status(400).json({ message: error.message });
   }
 });
@@ -89,9 +93,11 @@ app.put('/api/members/:id', async (req, res) => {
 // DELETE member
 app.delete('/api/members/:id', async (req, res) => {
   try {
-    await Member.findByIdAndDelete(req.params.id);
+    const deletedMember = await Member.findByIdAndDelete(req.params.id);
+    if (!deletedMember) return res.status(404).json({ message: 'Member not found' });
     res.json({ message: 'Member deleted successfully' });
   } catch (error) {
+    console.error('Error deleting member:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -110,11 +116,19 @@ app.get('/api/members/search/:keyword', async (req, res) => {
     });
     res.json(members);
   } catch (error) {
+    console.error('Error searching members:', error);
     res.status(500).json({ message: error.message });
   }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'OK', message: 'Server is running', timestamp: new Date() });
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
+  console.log(`📡 API available at http://localhost:${PORT}/api`);
+  console.log(`💚 Health check at http://localhost:${PORT}/api/health`);
 });
