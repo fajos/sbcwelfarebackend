@@ -112,6 +112,20 @@ app.delete('/api/members/:id', async (req, res) => {
   }
 });
 
+// ✅ NEW: DELETE ALL members (for resetting database)
+app.delete('/api/members', async (req, res) => {
+  try {
+    const result = await Member.deleteMany({});
+    res.json({ 
+      message: 'All members deleted successfully', 
+      deletedCount: result.deletedCount 
+    });
+  } catch (error) {
+    console.error('Error deleting all members:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Search members
 app.get('/api/members/search/:keyword', async (req, res) => {
   try {
@@ -127,17 +141,6 @@ app.get('/api/members/search/:keyword', async (req, res) => {
     res.json(members);
   } catch (error) {
     console.error('Error searching members:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// DELETE all members (for database reset)
-app.delete('/api/members', async (req, res) => {
-  try {
-    await Member.deleteMany({});
-    res.json({ message: 'All members deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting all members:', error);
     res.status(500).json({ message: error.message });
   }
 });
