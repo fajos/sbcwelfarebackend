@@ -16,21 +16,21 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// Updated Member Schema - dates stored as plain text strings
+// Member Schema - ALL fields as plain text (no date types)
 const memberSchema = new mongoose.Schema({
   firstName: { type: String, required: true },
   lastName: { type: String, required: true },
-  email: String,
-  gender: String,
-  phoneNumber: String,
-  whatsappNumber: String,
-  dateOfBirth: { type: String, default: '' }, // Store as plain text (DD/MM)
-  maritalStatus: String,
-  weddingAnniversary: { type: String, default: '' }, // Store as plain text (DD/MM)
-  residentialAddress: String,
-  occupation: String,
+  email: { type: String, default: '' },
+  gender: { type: String, default: '' },
+  phoneNumber: { type: String, default: '' },
+  whatsappNumber: { type: String, default: '' },
+  dateOfBirth: { type: String, default: '' }, // Plain text - no date logic
+  maritalStatus: { type: String, default: '' },
+  weddingAnniversary: { type: String, default: '' }, // Plain text - no date logic
+  residentialAddress: { type: String, default: '' },
+  occupation: { type: String, default: '' },
   completedFoundationClass: { type: String, default: 'No' },
-  churchUnit: String,
+  churchUnit: { type: String, default: '' },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
@@ -100,7 +100,7 @@ app.put('/api/members/:id', async (req, res) => {
   }
 });
 
-// DELETE member
+// DELETE single member
 app.delete('/api/members/:id', async (req, res) => {
   try {
     const deletedMember = await Member.findByIdAndDelete(req.params.id);
@@ -112,7 +112,7 @@ app.delete('/api/members/:id', async (req, res) => {
   }
 });
 
-// ✅ NEW: DELETE ALL members (for resetting database)
+// DELETE ALL members
 app.delete('/api/members', async (req, res) => {
   try {
     const result = await Member.deleteMany({});
