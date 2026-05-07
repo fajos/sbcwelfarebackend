@@ -6,7 +6,7 @@ const dotenv = require('dotenv');
 dotenv.config();
 const app = express();
 
-// Simple CORS configuration - allows all origins for development
+// Simple CORS configuration
 app.use(cors());
 app.use(express.json());
 
@@ -40,13 +40,13 @@ const Member = mongoose.model('Member', memberSchema);
 
 // ========== API ROUTES ==========
 
-// Health check
+// Health check - FIXED (removed members reference)
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
     message: 'Server is running', 
     timestamp: new Date(),
-    members: members.length
+    mongodb: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected'
   });
 });
 
