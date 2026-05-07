@@ -139,5 +139,4 @@ app.listen(PORT, () => {
   console.log(`📡 API URL: http://localhost:${PORT}/api`);
   console.log(`💚 Health check: http://localhost:${PORT}/api/health`);
   console.log(`\n✅ Ready to accept requests\n`);
-  console.log('🔗 API_URL:', API_URL);
 });
