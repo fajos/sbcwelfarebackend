@@ -6,7 +6,6 @@ const dotenv = require('dotenv');
 dotenv.config();
 const app = express();
 
-// Simple CORS configuration
 app.use(cors());
 app.use(express.json());
 
@@ -17,7 +16,7 @@ mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
-// Member Schema
+// Updated Member Schema - dates stored as plain text strings
 const memberSchema = new mongoose.Schema({
   firstName: { type: String, required: true },
   lastName: { type: String, required: true },
@@ -25,9 +24,9 @@ const memberSchema = new mongoose.Schema({
   gender: String,
   phoneNumber: String,
   whatsappNumber: String,
-  dateOfBirth: Date,
+  dateOfBirth: { type: String, default: '' }, // Store as plain text (DD/MM)
   maritalStatus: String,
-  weddingAnniversary: Date,
+  weddingAnniversary: { type: String, default: '' }, // Store as plain text (DD/MM)
   residentialAddress: String,
   occupation: String,
   completedFoundationClass: { type: String, default: 'No' },
@@ -40,7 +39,7 @@ const Member = mongoose.model('Member', memberSchema);
 
 // ========== API ROUTES ==========
 
-// Health check - FIXED (removed members reference)
+// Health check
 app.get('/api/health', (req, res) => {
   res.json({ 
     status: 'OK', 
@@ -132,7 +131,17 @@ app.get('/api/members/search/:keyword', async (req, res) => {
   }
 });
 
-// ========== START SERVER ==========
+// DELETE all members (for database reset)
+app.delete('/api/members', async (req, res) => {
+  try {
+    await Member.deleteMany({});
+    res.json({ message: 'All members deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting all members:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Server is running!`);
