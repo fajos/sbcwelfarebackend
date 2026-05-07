@@ -6,34 +6,15 @@ const dotenv = require('dotenv');
 dotenv.config();
 const app = express();
 
-// Enhanced CORS configuration for Vercel + Render
-const corsOptions = {
-  origin: [
-    'http://localhost:5173',           // Local development
-    'http://localhost:3000',            // Alternative local port
-    'https://sbcwelfarefrontend.vercel.app', // Replace with your Vercel URL
-    /\.vercel\.app$/,                   // All Vercel preview deployments
-    /\.onrender\.com$/                  // All Render backends (if needed)
-  ],
-  credentials: true,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
-
-// Apply CORS middleware
-app.use(cors(corsOptions));
-
-// Handle preflight requests
-app.options('*', cors(corsOptions));
-
+// Simple CORS configuration - allows all origins for development
+app.use(cors());
 app.use(express.json());
 
 // MongoDB Connection
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/saints_welfare';
 
 mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Connected to MongoDB Atlas'))
+  .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // Member Schema
@@ -57,7 +38,18 @@ const memberSchema = new mongoose.Schema({
 
 const Member = mongoose.model('Member', memberSchema);
 
-// API Routes
+// ========== API ROUTES ==========
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'Server is running', 
+    timestamp: new Date(),
+    members: members.length
+  });
+});
+
 // GET all members
 app.get('/api/members', async (req, res) => {
   try {
@@ -140,19 +132,11 @@ app.get('/api/members/search/:keyword', async (req, res) => {
   }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'Server is running', 
-    timestamp: new Date(),
-    environment: process.env.NODE_ENV 
-  });
-});
-
+// ========== START SERVER ==========
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📡 API available at http://localhost:${PORT}/api`);
-  console.log(`🌐 CORS enabled for:`, corsOptions.origin);
+  console.log(`\n🚀 Server is running!`);
+  console.log(`📡 API URL: http://localhost:${PORT}/api`);
+  console.log(`💚 Health check: http://localhost:${PORT}/api/health`);
+  console.log(`\n✅ Ready to accept requests\n`);
 });
