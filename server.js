@@ -249,6 +249,110 @@ app.get('/api/members/search/:keyword', authenticateToken, async (req, res) => {
   }
 });
 
+// ========== USER MANAGEMENT ROUTES (Super Admin only) ==========
+
+// Get all users (super admin only)
+app.get('/api/admin/users', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const users = await User.find({}, '-password'); // Exclude password field
+    res.json(users);
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create new user (super admin only)
+app.post('/api/admin/users', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const { username, password, role } = req.body;
+    
+    // Check if user exists
+    const existingUser = await User.findOne({ username });
+    if (existingUser) {
+      return res.status(400).json({ message: 'Username already exists' });
+    }
+    
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({
+      username,
+      password: hashedPassword,
+      role: role || 'viewer'
+    });
+    
+    await newUser.save();
+    res.status(201).json({ 
+      message: 'User created successfully',
+      user: { id: newUser._id, username: newUser.username, role: newUser.role }
+    });
+  } catch (error) {
+    console.error('Error creating user:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update user role (super admin only)
+app.put('/api/admin/users/:id', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const { role } = req.body;
+    const userId = req.params.id;
+    
+    // Prevent changing own role
+    if (userId === req.user.id) {
+      return res.status(400).json({ message: 'Cannot change your own role' });
+    }
+    
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { role },
+      { new: true, select: '-password' }
+    );
+    
+    if (!updatedUser) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    res.json({ message: 'User role updated successfully', user: updatedUser });
+  } catch (error) {
+    console.error('Error updating user:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Reset user password (super admin only)
+app.put('/api/admin/users/:id/reset-password', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const { newPassword } = req.body;
+    const userId = req.params.id;
+    
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await User.findByIdAndUpdate(userId, { password: hashedPassword });
+    
+    res.json({ message: 'Password reset successfully' });
+  } catch (error) {
+    console.error('Error resetting password:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete user (super admin only)
+app.delete('/api/admin/users/:id', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const userId = req.params.id;
+    
+    // Prevent deleting own account
+    if (userId === req.user.id) {
+      return res.status(400).json({ message: 'Cannot delete your own account' });
+    }
+    
+    await User.findByIdAndDelete(userId);
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting user:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`\n🚀 Server is running!`);
