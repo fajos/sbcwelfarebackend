@@ -50,6 +50,25 @@ const memberSchema = new mongoose.Schema({
 
 const Member = mongoose.model('Member', memberSchema);
 
+// ========== CALENDAR SCHEMA ==========
+const calendarEventSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, default: '' },
+  eventDate: { type: Date, required: true },
+  eventTime: { type: String, default: '' },
+  eventType: { 
+    type: String, 
+    enum: ['service', 'prayer', 'fellowship', 'outreach', 'wedding', 'baptism', 'other'],
+    default: 'service'
+  },
+  location: { type: String, default: '' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const CalendarEvent = mongoose.model('CalendarEvent', calendarEventSchema);
+
 // ========== MIDDLEWARE ==========
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -397,6 +416,70 @@ app.delete('/api/admin/users/:id', authenticateToken, checkRole(['admin']), asyn
     res.json({ message: 'User deleted successfully' });
   } catch (error) {
     console.error('Error deleting user:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get all events
+app.get('/api/calendar', authenticateToken, async (req, res) => {
+  try {
+    const { start, end } = req.query;
+    let query = {};
+    
+    if (start && end) {
+      query.eventDate = {
+        $gte: new Date(start),
+        $lte: new Date(end)
+      };
+    }
+    
+    const events = await CalendarEvent.find(query).sort({ eventDate: 1 });
+    res.json(events);
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create event (admin/editor only)
+app.post('/api/calendar', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const event = new CalendarEvent({
+      ...req.body,
+      createdBy: req.user.id
+    });
+    const savedEvent = await event.save();
+    res.status(201).json(savedEvent);
+  } catch (error) {
+    console.error('Error creating event:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Update event
+app.put('/api/calendar/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const updatedEvent = await CalendarEvent.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, updatedAt: Date.now() },
+      { new: true }
+    );
+    if (!updatedEvent) return res.status(404).json({ message: 'Event not found' });
+    res.json(updatedEvent);
+  } catch (error) {
+    console.error('Error updating event:', error);
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Delete event
+app.delete('/api/calendar/:id', authenticateToken, checkRole(['admin']), async (req, res) => {
+  try {
+    const deletedEvent = await CalendarEvent.findByIdAndDelete(req.params.id);
+    if (!deletedEvent) return res.status(404).json({ message: 'Event not found' });
+    res.json({ message: 'Event deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting event:', error);
     res.status(500).json({ message: error.message });
   }
 });
