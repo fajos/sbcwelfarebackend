@@ -441,6 +441,27 @@ app.get('/api/calendar', authenticateToken, async (req, res) => {
   }
 });
 
+// Get upcoming events (next 30 days)
+app.get('/api/calendar/upcoming', authenticateToken, async (req, res) => {
+  try {
+    const today = new Date();
+    const thirtyDaysLater = new Date();
+    thirtyDaysLater.setDate(today.getDate() + 30);
+    
+    const events = await CalendarEvent.find({
+      eventDate: {
+        $gte: today,
+        $lte: thirtyDaysLater
+      }
+    }).sort({ eventDate: 1 });
+    
+    res.json(events);
+  } catch (error) {
+    console.error('Error fetching upcoming events:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Create event (admin/editor only)
 app.post('/api/calendar', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
   try {
