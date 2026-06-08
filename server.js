@@ -62,6 +62,15 @@ const calendarEventSchema = new mongoose.Schema({
     default: 'service'
   },
   location: { type: String, default: '' },
+  isRecurring: { type: Boolean, default: false },
+  recurrence: {
+    pattern: { type: String, enum: ['none', 'daily', 'weekly', 'monthly', 'last_day_of_month', 'nth_day_of_week'] },
+    interval: { type: Number, default: 1 }, // every X days/weeks/months
+    dayOfWeek: { type: Number }, // 0-6 for weekly or nth_day_of_week
+    nth: { type: Number }, // 1 for first, 2 for second, ..., 5 for last
+    endDate: { type: Date }
+  },
+  parentId: { type: mongoose.Schema.Types.ObjectId, ref: 'CalendarEvent' }, // for series management
   createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
@@ -420,21 +429,97 @@ app.delete('/api/admin/users/:id', authenticateToken, checkRole(['admin']), asyn
   }
 });
 
+// Function to expand recurring events
+const expandRecurringEvents = (events, startDate, endDate) => {
+  const expandedEvents = [];
+
+  events.forEach(event => {
+    if (!event.isRecurring) {
+      if (event.eventDate >= startDate && event.eventDate <= endDate) {
+        expandedEvents.push(event);
+      }
+      return;
+    }
+
+    // Handle recurring events
+    let current = new Date(event.eventDate);
+    const recurrenceEnd = event.recurrence.endDate ? new Date(event.recurrence.endDate) : endDate;
+    const actualEnd = recurrenceEnd < endDate ? recurrenceEnd : endDate;
+
+    // Safety check: if interval is missing or 0, set to 1
+    const interval = event.recurrence.interval || 1;
+
+    while (current <= actualEnd) {
+      if (current >= startDate) {
+        // Clone event with new date
+        const expandedEvent = event.toObject();
+        expandedEvent.eventDate = new Date(current);
+        expandedEvents.push(expandedEvent);
+      }
+
+      // Advance current based on pattern
+      if (event.recurrence.pattern === 'daily') {
+        current.setDate(current.getDate() + interval);
+      } else if (event.recurrence.pattern === 'weekly') {
+        current.setDate(current.getDate() + 7 * interval);
+      } else if (event.recurrence.pattern === 'monthly') {
+        current.setMonth(current.getMonth() + interval);
+      } else if (event.recurrence.pattern === 'nth_day_of_week') {
+        // Advance to next month
+        current.setMonth(current.getMonth() + interval);
+        // Find the nth day of week in that month
+        const firstDayOfMonth = new Date(current.getFullYear(), current.getMonth(), 1);
+        let dayCount = 0;
+        let tempDate = new Date(firstDayOfMonth);
+
+        if (event.recurrence.nth === 5) { // "Last"
+          const lastDayOfMonth = new Date(current.getFullYear(), current.getMonth() + 1, 0);
+          tempDate = new Date(lastDayOfMonth);
+          while (tempDate.getDay() !== event.recurrence.dayOfWeek) {
+            tempDate.setDate(tempDate.getDate() - 1);
+          }
+        } else {
+          while (dayCount < event.recurrence.nth) {
+            if (tempDate.getDay() === event.recurrence.dayOfWeek) {
+              dayCount++;
+            }
+            if (dayCount < event.recurrence.nth) {
+              tempDate.setDate(tempDate.getDate() + 1);
+            }
+          }
+        }
+        current = tempDate;
+      } else {
+        break; // Unknown pattern
+      }
+
+      // Avoid infinite loops if current doesn't advance
+      if (current.getTime() === new Date(event.eventDate).getTime() && interval === 0) break;
+    }
+  });
+
+  return expandedEvents;
+};
+
 // Get all events
 app.get('/api/calendar', authenticateToken, async (req, res) => {
   try {
     const { start, end } = req.query;
-    let query = {};
-    
-    if (start && end) {
-      query.eventDate = {
-        $gte: new Date(start),
-        $lte: new Date(end)
-      };
+
+    // We'll fetch all events that COULD fall into this range
+    // For non-recurring: eventDate between start and end
+    // For recurring: eventDate <= end AND (recurrence.endDate is null OR recurrence.endDate >= start)
+    const events = await CalendarEvent.find({}).sort({ eventDate: 1 });
+
+    if (!start || !end) {
+      return res.json(events);
     }
-    
-    const events = await CalendarEvent.find(query).sort({ eventDate: 1 });
-    res.json(events);
+
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+
+    const expandedEvents = expandRecurringEvents(events, startDate, endDate);
+    res.json(expandedEvents);
   } catch (error) {
     console.error('Error fetching events:', error);
     res.status(500).json({ message: error.message });
@@ -448,14 +533,10 @@ app.get('/api/calendar/upcoming', authenticateToken, async (req, res) => {
     const thirtyDaysLater = new Date();
     thirtyDaysLater.setDate(today.getDate() + 30);
     
-    const events = await CalendarEvent.find({
-      eventDate: {
-        $gte: today,
-        $lte: thirtyDaysLater
-      }
-    }).sort({ eventDate: 1 });
+    const events = await CalendarEvent.find({}).sort({ eventDate: 1 });
+    const expandedEvents = expandRecurringEvents(events, today, thirtyDaysLater);
     
-    res.json(events);
+    res.json(expandedEvents);
   } catch (error) {
     console.error('Error fetching upcoming events:', error);
     res.status(500).json({ message: error.message });
