@@ -460,7 +460,7 @@ app.get('/api/calendar/upcoming', authenticateToken, async (req, res) => {
     console.error('Error fetching upcoming events:', error);
     res.status(500).json({ message: error.message });
   }
-});
+}); 
 
 // Create event (admin/editor only)
 app.post('/api/calendar', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
