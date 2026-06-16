@@ -89,15 +89,35 @@ cron.schedule('0 8 * * *', async () => {
       const dob = parseDateString(m.dateOfBirth);
       if (dob && dob.month === currentMonth && dob.day === currentDay) {
         const message = `Happy Birthday ${m.firstName} ${m.lastName}! We pray that God's grace and blessings be upon you today and always. Have a wonderful celebration! - C&S Saints Builder Church`;
-        await sendSMS(m.phoneNumber, message);
+        const result = await sendSMS(m.phoneNumber, message);
         console.log(`🎂 Birthday SMS sent to ${m.firstName} ${m.lastName}`);
+
+        // Log to history
+        await new SMSHistory({
+          recipients: [m.phoneNumber],
+          recipientNames: `${m.firstName} ${m.lastName}`,
+          message: message,
+          type: 'celebration',
+          status: result.success ? 'sent' : 'failed',
+          error: result.success ? null : result.error
+        }).save();
       }
 
       // Check Anniversary
       const anniv = parseDateString(m.weddingAnniversary);
       if (anniv && anniv.month === currentMonth && anniv.day === currentDay) {
         const message = `Happy Wedding Anniversary ${m.firstName} ${m.lastName}! May your union continue to be blessed with love, joy, and peace. - C&S Saints Builder Church`;
-        await sendSMS(m.phoneNumber, message);
+        const result = await sendSMS(m.phoneNumber, message);
+
+        // Log to history
+        await new SMSHistory({
+          recipients: [m.phoneNumber],
+          recipientNames: `${m.firstName} ${m.lastName}`,
+          message: message,
+          type: 'celebration',
+          status: result.success ? 'sent' : 'failed',
+          error: result.success ? null : result.error
+        }).save();
         console.log(`💍 Anniversary SMS sent to ${m.firstName} ${m.lastName}`);
       }
     }
@@ -129,6 +149,19 @@ cron.schedule('* * * * *', async () => {
             sms.status = 'failed';
             sms.error = result.error;
           }
+
+          // Log to history
+          await new SMSHistory({
+            recipients: sms.recipients,
+            recipientNames: sms.recipientNames,
+            message: sms.message,
+            type: 'scheduled',
+            status: sms.status,
+            error: sms.error,
+            createdBy: sms.createdBy,
+            sentAt: new Date()
+          }).save();
+
         } catch (err) {
           sms.status = 'failed';
           sms.error = err.message;
@@ -255,6 +288,20 @@ const scheduledSMSSchema = new mongoose.Schema({
 });
 
 const ScheduledSMS = mongoose.model('ScheduledSMS', scheduledSMSSchema);
+
+// ========== SMS HISTORY SCHEMA ==========
+const smsHistorySchema = new mongoose.Schema({
+  recipients: [String],
+  recipientNames: String,
+  message: { type: String, required: true },
+  sentAt: { type: Date, default: Date.now },
+  status: { type: String, enum: ['sent', 'failed'], default: 'sent' },
+  error: String,
+  type: { type: String, enum: ['broadcast', 'group', 'celebration', 'scheduled'], default: 'broadcast' },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }
+});
+
+const SMSHistory = mongoose.model('SMSHistory', smsHistorySchema);
 
 // ========== MIDDLEWARE ==========
 const authenticateToken = (req, res, next) => {
@@ -1008,111 +1055,79 @@ app.get('/api/reports/demographics', authenticateToken, async (req, res) => {
   }
 });
 
-// ========== NOTIFICATION ROUTES ==========
+// ========== SMS & BROADCAST ROUTES ==========
 
-// Get upcoming birthdays and anniversaries
-app.get('/api/notifications/upcoming-celebrations', authenticateToken, async (req, res) => {
+// Get upcoming birthdays and anniversaries (next 14 days)
+app.get('/api/sms/upcoming-celebrations', authenticateToken, async (req, res) => {
   try {
     const today = new Date();
-    const currentMonth = today.getMonth() + 1;
-    const currentDay = today.getDate();
-
-    // Fetch all members
+    today.setHours(0, 0, 0, 0);
     const members = await Member.find({}, 'firstName lastName phoneNumber dateOfBirth weddingAnniversary');
-
     const celebrations = [];
 
-    members.forEach(m => {
-      if (m.dateOfBirth) {
-        const dob = parseDateString(m.dateOfBirth);
-        if (dob && dob.month === currentMonth && dob.day >= currentDay) {
+    const checkCelebration = (m, dateStr, type) => {
+      const parsed = parseDateString(dateStr);
+      if (!parsed) return;
+      for (let i = 0; i <= 14; i++) {
+        const futureDate = new Date(today);
+        futureDate.setDate(today.getDate() + i);
+        if (futureDate.getMonth() + 1 === parsed.month && futureDate.getDate() === parsed.day) {
           celebrations.push({
             memberId: m._id,
             name: `${m.firstName} ${m.lastName}`,
             phoneNumber: m.phoneNumber,
-            type: 'Birthday',
-            date: m.dateOfBirth,
-            day: dob.day
+            type: type,
+            originalDate: dateStr,
+            occurrenceDate: new Date(futureDate),
+            daysUntil: i
           });
+          break;
         }
       }
+    };
 
-      if (m.weddingAnniversary) {
-        const anniv = parseDateString(m.weddingAnniversary);
-        if (anniv && anniv.month === currentMonth && anniv.day >= currentDay) {
-          celebrations.push({
-            memberId: m._id,
-            name: `${m.firstName} ${m.lastName}`,
-            phoneNumber: m.phoneNumber,
-            type: 'Anniversary',
-            date: m.weddingAnniversary,
-            day: anniv.day
-          });
-        }
-      }
+    members.forEach(m => {
+      checkCelebration(m, m.dateOfBirth, 'Birthday');
+      checkCelebration(m, m.weddingAnniversary, 'Anniversary');
     });
 
-    res.json(celebrations.sort((a, b) => a.day - b.day));
+    res.json(celebrations.sort((a, b) => a.daysUntil - b.daysUntil));
   } catch (error) {
-    console.error('Error fetching celebrations:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Send celebration SMS
-app.post('/api/notifications/send-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
-  try {
-    const { phoneNumber, message } = req.body;
-
-    if (!phoneNumber || !message) {
-      return res.status(400).json({ message: 'Phone number and message are required' });
-    }
-
-    const result = await sendSMS(phoneNumber, message);
-
-    if (result.success) {
-      res.json({ message: 'SMS sent successfully' });
-    } else {
-      res.status(500).json({ message: result.error });
-    }
-  } catch (error) {
-    console.error('Error sending SMS:', error);
     res.status(500).json({ message: error.message });
   }
 });
 
 // Broadcast SMS to multiple members
-app.post('/api/notifications/broadcast-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+app.post('/api/sms/broadcast', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
   try {
     const { memberIds, message } = req.body;
-
     if (!memberIds || !memberIds.length || !message) {
       return res.status(400).json({ message: 'Member IDs and message are required' });
     }
 
     const members = await Member.find({ _id: { $in: memberIds } }, 'phoneNumber firstName lastName');
-    const validPhoneNumbers = members
-      .map(m => m.phoneNumber)
-      .filter(phone => phone && phone !== '-');
+    const validPhoneNumbers = members.map(m => m.phoneNumber).filter(phone => phone && phone !== '-');
 
     if (validPhoneNumbers.length === 0) {
-      return res.status(400).json({ message: 'None of the selected members have valid phone numbers' });
+      return res.status(400).json({ message: 'No valid phone numbers found' });
     }
 
-    // BulkSMSNigeria supports comma-separated numbers for bulk sending
-    const commaSeparatedNumbers = validPhoneNumbers.join(',');
-    const result = await sendSMS(commaSeparatedNumbers, message);
-
+    const result = await sendSMS(validPhoneNumbers.join(','), message);
     if (result.success) {
-      res.json({
-        message: `SMS broadcast sent successfully to ${validPhoneNumbers.length} members`,
-        count: validPhoneNumbers.length
-      });
+      await new SMSHistory({
+        recipients: validPhoneNumbers,
+        recipientNames: members.map(m => `${m.firstName} ${m.lastName}`).join(', '),
+        message: message,
+        type: 'broadcast',
+        status: 'sent',
+        createdBy: req.user.id
+      }).save();
+
+      res.json({ message: `Broadcast sent to ${validPhoneNumbers.length} members` });
     } else {
       res.status(500).json({ message: result.error });
     }
   } catch (error) {
-    console.error('Broadcast SMS Error:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -1186,8 +1201,29 @@ app.post('/api/groups/:id/send-sms', authenticateToken, checkRole(['admin', 'edi
     const result = await sendSMS(phoneNumbers.join(','), message);
 
     if (result.success) {
+      // Log to history
+      await new SMSHistory({
+        recipients: phoneNumbers,
+        recipientNames: `Group: ${group.name}`,
+        message: message,
+        type: 'group',
+        status: 'sent',
+        createdBy: req.user.id
+      }).save();
+
       res.json({ message: `SMS sent to ${phoneNumbers.length} members of ${group.name}` });
     } else {
+      // Log failed attempt
+      await new SMSHistory({
+        recipients: phoneNumbers,
+        recipientNames: `Group: ${group.name}`,
+        message: message,
+        type: 'group',
+        status: 'failed',
+        error: result.error,
+        createdBy: req.user.id
+      }).save();
+
       res.status(500).json({ message: result.error });
     }
   } catch (error) {
@@ -1269,6 +1305,18 @@ app.delete('/api/scheduled-sms/:id', authenticateToken, checkRole(['admin', 'edi
   try {
     await ScheduledSMS.findByIdAndDelete(req.params.id);
     res.json({ message: 'Scheduled SMS cancelled successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== SMS HISTORY ROUTES ==========
+
+// Get SMS history
+app.get('/api/sms-history', authenticateToken, async (req, res) => {
+  try {
+    const history = await SMSHistory.find().sort({ sentAt: -1 }).limit(100);
+    res.json(history);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
