@@ -5,6 +5,7 @@ const dotenv = require('dotenv');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios'); 
+const cron = require('node-cron');
 
 dotenv.config();
 const app = express();
@@ -18,6 +19,129 @@ const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/saints
 mongoose.connect(MONGODB_URI)
   .then(() => console.log('✅ Connected to MongoDB'))
   .catch(err => console.error('❌ MongoDB connection error:', err));
+
+// Function to parse date strings into {month, day}
+const parseDateString = (dateStr) => {
+  if (!dateStr || dateStr === '-') return null;
+
+  // Handle YYYY-MM-DD or MM-DD
+  if (dateStr.includes('-')) {
+    const parts = dateStr.split('-');
+    if (parts.length === 3) {
+      return { month: parseInt(parts[1]), day: parseInt(parts[2]) };
+    }
+    if (parts.length === 2) {
+      return { month: parseInt(parts[0]), day: parseInt(parts[1]) };
+    }
+  }
+
+  const monthMap = {
+    january: 1, jan: 1, february: 2, feb: 2, march: 3, mar: 3,
+    april: 4, apr: 4, may: 5, june: 6, jun: 6, july: 7, jul: 7,
+    august: 8, aug: 8, september: 9, sep: 9, october: 10, oct: 10,
+    november: 11, nov: 11, december: 12, dec: 12
+  };
+
+  const patterns = [
+    { regex: /(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\s+(\d{1,2})/i },
+    { regex: /(\d{1,2})\/(\d{1,2})/ },
+    { regex: /(\d{1,2})(?:st|nd|rd|th)?\s+(january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i }
+  ];
+
+  for (const pattern of patterns) {
+    const match = dateStr.match(pattern.regex);
+    if (match) {
+      if (pattern.regex.toString().includes('january')) {
+        const month = monthMap[match[1].toLowerCase()];
+        const day = parseInt(match[2]);
+        return { month, day };
+      } else if (pattern.regex.toString().includes('/')) {
+        const month = parseInt(match[2]);
+        const day = parseInt(match[1]);
+        if (month > 12) return { month: day, day: month };
+        return { month, day };
+      } else if (pattern.regex.toString().includes('st|nd|rd|th')) {
+        const day = parseInt(match[1]);
+        const month = monthMap[match[2].toLowerCase()];
+        return { month, day };
+      }
+    }
+  }
+  return null;
+};
+
+// ========== AUTOMATED TASKS (CRON) ==========
+
+// Schedule celebration SMS to run every day at 8:00 AM
+cron.schedule('0 8 * * *', async () => {
+  console.log('⏰ Running scheduled celebration SMS task...');
+  try {
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentDay = today.getDate();
+
+    const members = await Member.find({}, 'firstName lastName phoneNumber dateOfBirth weddingAnniversary');
+
+    for (const m of members) {
+      if (!m.phoneNumber || m.phoneNumber === '-') continue;
+
+      // Check Birthday
+      const dob = parseDateString(m.dateOfBirth);
+      if (dob && dob.month === currentMonth && dob.day === currentDay) {
+        const message = `Happy Birthday ${m.firstName} ${m.lastName}! We pray that God's grace and blessings be upon you today and always. Have a wonderful celebration! - C&S Saints Builder Church`;
+        await sendSMS(m.phoneNumber, message);
+        console.log(`🎂 Birthday SMS sent to ${m.firstName} ${m.lastName}`);
+      }
+
+      // Check Anniversary
+      const anniv = parseDateString(m.weddingAnniversary);
+      if (anniv && anniv.month === currentMonth && anniv.day === currentDay) {
+        const message = `Happy Wedding Anniversary ${m.firstName} ${m.lastName}! May your union continue to be blessed with love, joy, and peace. - C&S Saints Builder Church`;
+        await sendSMS(m.phoneNumber, message);
+        console.log(`💍 Anniversary SMS sent to ${m.firstName} ${m.lastName}`);
+      }
+    }
+  } catch (error) {
+    console.error('Error in scheduled celebration SMS:', error);
+  }
+}, {
+  timezone: "Africa/Lagos"
+});
+
+// Check for scheduled Bulk SMS every minute
+cron.schedule('* * * * *', async () => {
+  try {
+    const now = new Date();
+    const pendingSMS = await ScheduledSMS.find({
+      status: 'pending',
+      scheduledTime: { $lte: now }
+    });
+
+    if (pendingSMS.length > 0) {
+      console.log(`🕒 Found ${pendingSMS.length} due scheduled SMS...`);
+      for (const sms of pendingSMS) {
+        try {
+          const result = await sendSMS(sms.recipients.join(','), sms.message);
+          if (result.success) {
+            sms.status = 'sent';
+            sms.sentAt = new Date();
+          } else {
+            sms.status = 'failed';
+            sms.error = result.error;
+          }
+        } catch (err) {
+          sms.status = 'failed';
+          sms.error = err.message;
+        }
+        await sms.save();
+      }
+    }
+  } catch (error) {
+    console.error('Error in scheduled SMS runner:', error);
+  }
+}, {
+  timezone: "Africa/Lagos"
+});
 
 // ========== USER SCHEMA ==========
 const userSchema = new mongoose.Schema({
@@ -48,6 +172,13 @@ const memberSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+// Indexes for performance optimization
+memberSchema.index({ firstName: 1, lastName: 1 });
+memberSchema.index({ gender: 1 });
+memberSchema.index({ churchUnit: 1 });
+memberSchema.index({ completedFoundationClass: 1 });
+memberSchema.index({ phoneNumber: 1 });
+
 const Member = mongoose.model('Member', memberSchema);
 
 // ========== CALENDAR SCHEMA ==========
@@ -76,6 +207,9 @@ const calendarEventSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+calendarEventSchema.index({ eventDate: 1 });
+calendarEventSchema.index({ eventType: 1 });
+
 const CalendarEvent = mongoose.model('CalendarEvent', calendarEventSchema);
 
 // ========== ATTENDANCE SCHEMA ==========
@@ -90,8 +224,37 @@ const attendanceSchema = new mongoose.Schema({
 
 // Ensure a member can only be marked once for a specific event instance
 attendanceSchema.index({ event: 1, eventDate: 1, member: 1 }, { unique: true });
+attendanceSchema.index({ eventDate: -1 });
+attendanceSchema.index({ member: 1 });
 
 const Attendance = mongoose.model('Attendance', attendanceSchema);
+
+// ========== GROUP SCHEMA ==========
+const groupSchema = new mongoose.Schema({
+  name: { type: String, required: true, unique: true },
+  description: { type: String, default: '' },
+  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Member' }],
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const Group = mongoose.model('Group', groupSchema);
+
+// ========== SCHEDULED SMS SCHEMA ==========
+const scheduledSMSSchema = new mongoose.Schema({
+  recipients: [String], // Array of phone numbers
+  recipientNames: String, // String summary of recipients for UI
+  message: { type: String, required: true },
+  scheduledTime: { type: Date, required: true },
+  status: { type: String, enum: ['pending', 'sent', 'failed', 'cancelled'], default: 'pending' },
+  error: String,
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now },
+  sentAt: Date
+});
+
+const ScheduledSMS = mongoose.model('ScheduledSMS', scheduledSMSSchema);
 
 // ========== MIDDLEWARE ==========
 const authenticateToken = (req, res, next) => {
@@ -138,31 +301,52 @@ function formatNigerianNumber(phoneNumber) {
   }
 }
 
-// Send SMS via Multitexter
+const BULKSMS_TOKEN = process.env.BULKSMS_TOKEN;
+const BULKSMS_SENDER_ID = process.env.BULKSMS_SENDER_ID || 'SAINTS';
+
+// Send SMS via BulkSMSNigeria
 async function sendSMS(phoneNumber, message) {
   try {
-    const formattedNumber = formatNigerianNumber(phoneNumber);
-    
-    if (!formattedNumber) {
+    if (!phoneNumber) return { success: false, error: 'No phone number provided' };
+
+    // Handle multiple numbers (comma-separated string)
+    const numbers = phoneNumber.toString().split(',');
+    const formattedNumbers = numbers
+      .map(num => formatNigerianNumber(num)?.replace('+', ''))
+      .filter(Boolean);
+
+    if (formattedNumbers.length === 0) {
       return { success: false, error: 'Invalid phone number format' };
     }
+
+    const recipients = formattedNumbers.join(',');
+
+    if (!BULKSMS_TOKEN) {
+      console.warn('SMS simulated (No API Token):', recipients, message);
+      return { success: true, simulated: true };
+    }
     
-    const response = await axios.post('https://www.multitexter.com/api/v2/sms/send', {
-      api_key: MULTITEXTER_API_KEY,
-      to: formattedNumber,
-      from: MULTITEXTER_SENDER_ID,
-      message: message,
-      type: 'plain'
+    const response = await axios.post('https://www.bulksmsnigeria.com/api/v2/sms', {
+      to: recipients,
+      from: BULKSMS_SENDER_ID,
+      body: message,
+      gateway: '0' // Direct delivery gateway
+    }, {
+      headers: {
+        'Authorization': `Bearer ${BULKSMS_TOKEN}`,
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
     });
     
-    // Check response
-    if (response.data.status === 'success') {
+    // BulkSMSNigeria v2 returns success: true or a data object
+    if (response.data && (response.data.data?.status === 'success' || response.data.status === 'success')) {
       return { success: true, data: response.data };
     } else {
       return { success: false, error: response.data.message || 'Failed to send' };
     }
   } catch (error) {
-    console.error('Multitexter Error:', error.response?.data || error.message);
+    console.error('BulkSMSNigeria Error:', error.response?.data || error.message);
     return { success: false, error: error.response?.data?.message || error.message };
   }
 }
@@ -236,7 +420,8 @@ app.post('/api/auth/setup', async (req, res) => {
 
 // Health check (public)
 app.get('/api/health', (req, res) => {
-  res.json({ 
+  console.log(`Ping received at ${new Date().toISOString()}`);
+  res.json({
     status: 'OK', 
     message: 'Server is running', 
     timestamp: new Date(),
@@ -725,11 +910,366 @@ app.get('/api/attendance', authenticateToken, async (req, res) => {
 app.get('/api/attendance/member/:memberId', authenticateToken, async (req, res) => {
   try {
     const attendance = await Attendance.find({ member: req.params.memberId })
-      .populate('event', 'title')
+      .populate('event', 'title eventType eventTime location')
       .sort({ eventDate: -1 });
     res.json(attendance);
   } catch (error) {
     console.error('Error fetching member attendance:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== REPORTING ROUTES ==========
+
+// Get monthly attendance trends
+app.get('/api/reports/attendance-trends', authenticateToken, async (req, res) => {
+  try {
+    const { months = 6 } = req.query;
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setMonth(endDate.getMonth() - parseInt(months));
+    startDate.setDate(1); // Start of month
+
+    const trends = await Attendance.aggregate([
+      {
+        $match: {
+          eventDate: { $gte: startDate, $lte: endDate }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$eventDate" },
+            month: { $month: "$eventDate" }
+          },
+          totalAttendance: { $sum: 1 },
+          sessionsCount: { $addToSet: { event: "$event", date: "$eventDate" } }
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          year: "$_id.year",
+          month: "$_id.month",
+          totalAttendance: 1,
+          avgAttendance: {
+            $cond: [
+              { $gt: [{ $size: "$sessionsCount" }, 0] },
+              { $divide: ["$totalAttendance", { $size: "$sessionsCount" }] },
+              0
+            ]
+          },
+          sessionsCount: { $size: "$sessionsCount" }
+        }
+      },
+      { $sort: { year: 1, month: 1 } }
+    ]);
+
+    res.json(trends);
+  } catch (error) {
+    console.error('Error fetching attendance trends:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get member demographics report
+app.get('/api/reports/demographics', authenticateToken, async (req, res) => {
+  try {
+    const totalMembers = await Member.countDocuments();
+
+    const genderStats = await Member.aggregate([
+      { $group: { _id: "$gender", count: { $sum: 1 } } }
+    ]);
+
+    const maritalStats = await Member.aggregate([
+      { $group: { _id: "$maritalStatus", count: { $sum: 1 } } }
+    ]);
+
+    const foundationClassStats = await Member.aggregate([
+      { $group: { _id: "$completedFoundationClass", count: { $sum: 1 } } }
+    ]);
+
+    const unitStats = await Member.aggregate([
+      { $group: { _id: "$churchUnit", count: { $sum: 1 } } },
+      { $sort: { count: -1 } },
+      { $limit: 15 } // Limit to top 15 units to avoid cluttered charts
+    ]);
+
+    res.json({
+      totalMembers,
+      genderStats,
+      maritalStats,
+      foundationClassStats,
+      unitStats
+    });
+  } catch (error) {
+    console.error('Error fetching demographics:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== NOTIFICATION ROUTES ==========
+
+// Get upcoming birthdays and anniversaries
+app.get('/api/notifications/upcoming-celebrations', authenticateToken, async (req, res) => {
+  try {
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentDay = today.getDate();
+
+    // Fetch all members
+    const members = await Member.find({}, 'firstName lastName phoneNumber dateOfBirth weddingAnniversary');
+
+    const celebrations = [];
+
+    members.forEach(m => {
+      if (m.dateOfBirth) {
+        const dob = parseDateString(m.dateOfBirth);
+        if (dob && dob.month === currentMonth && dob.day >= currentDay) {
+          celebrations.push({
+            memberId: m._id,
+            name: `${m.firstName} ${m.lastName}`,
+            phoneNumber: m.phoneNumber,
+            type: 'Birthday',
+            date: m.dateOfBirth,
+            day: dob.day
+          });
+        }
+      }
+
+      if (m.weddingAnniversary) {
+        const anniv = parseDateString(m.weddingAnniversary);
+        if (anniv && anniv.month === currentMonth && anniv.day >= currentDay) {
+          celebrations.push({
+            memberId: m._id,
+            name: `${m.firstName} ${m.lastName}`,
+            phoneNumber: m.phoneNumber,
+            type: 'Anniversary',
+            date: m.weddingAnniversary,
+            day: anniv.day
+          });
+        }
+      }
+    });
+
+    res.json(celebrations.sort((a, b) => a.day - b.day));
+  } catch (error) {
+    console.error('Error fetching celebrations:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Send celebration SMS
+app.post('/api/notifications/send-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { phoneNumber, message } = req.body;
+
+    if (!phoneNumber || !message) {
+      return res.status(400).json({ message: 'Phone number and message are required' });
+    }
+
+    const result = await sendSMS(phoneNumber, message);
+
+    if (result.success) {
+      res.json({ message: 'SMS sent successfully' });
+    } else {
+      res.status(500).json({ message: result.error });
+    }
+  } catch (error) {
+    console.error('Error sending SMS:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Broadcast SMS to multiple members
+app.post('/api/notifications/broadcast-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { memberIds, message } = req.body;
+
+    if (!memberIds || !memberIds.length || !message) {
+      return res.status(400).json({ message: 'Member IDs and message are required' });
+    }
+
+    const members = await Member.find({ _id: { $in: memberIds } }, 'phoneNumber firstName lastName');
+    const validPhoneNumbers = members
+      .map(m => m.phoneNumber)
+      .filter(phone => phone && phone !== '-');
+
+    if (validPhoneNumbers.length === 0) {
+      return res.status(400).json({ message: 'None of the selected members have valid phone numbers' });
+    }
+
+    // BulkSMSNigeria supports comma-separated numbers for bulk sending
+    const commaSeparatedNumbers = validPhoneNumbers.join(',');
+    const result = await sendSMS(commaSeparatedNumbers, message);
+
+    if (result.success) {
+      res.json({
+        message: `SMS broadcast sent successfully to ${validPhoneNumbers.length} members`,
+        count: validPhoneNumbers.length
+      });
+    } else {
+      res.status(500).json({ message: result.error });
+    }
+  } catch (error) {
+    console.error('Broadcast SMS Error:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== GROUP ROUTES ==========
+
+// Get all groups
+app.get('/api/groups', authenticateToken, async (req, res) => {
+  try {
+    const groups = await Group.find().populate('members', 'firstName lastName phoneNumber churchUnit');
+    res.json(groups);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create group
+app.post('/api/groups', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const group = new Group({
+      ...req.body,
+      createdBy: req.user.id
+    });
+    await group.save();
+    res.status(201).json(group);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Update group
+app.put('/api/groups/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const group = await Group.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, updatedAt: Date.now() },
+      { new: true }
+    );
+    res.json(group);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Delete group
+app.delete('/api/groups/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    await Group.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Group deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Send SMS to group
+app.post('/api/groups/:id/send-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { message } = req.body;
+    const group = await Group.findById(req.params.id).populate('members', 'phoneNumber');
+
+    if (!group) return res.status(404).json({ message: 'Group not found' });
+
+    const phoneNumbers = group.members
+      .map(m => m.phoneNumber)
+      .filter(p => p && p !== '-');
+
+    if (phoneNumbers.length === 0) {
+      return res.status(400).json({ message: 'No valid phone numbers in this group' });
+    }
+
+    const result = await sendSMS(phoneNumbers.join(','), message);
+
+    if (result.success) {
+      res.json({ message: `SMS sent to ${phoneNumbers.length} members of ${group.name}` });
+    } else {
+      res.status(500).json({ message: result.error });
+    }
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== SCHEDULED SMS ROUTES ==========
+
+// Get all pending scheduled SMS
+app.get('/api/scheduled-sms', authenticateToken, async (req, res) => {
+  try {
+    const messages = await ScheduledSMS.find({ status: 'pending' }).sort({ scheduledTime: 1 });
+    res.json(messages);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Schedule a new SMS
+app.post('/api/scheduled-sms', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { memberIds, groupIds, message, scheduledTime } = req.body;
+
+    if (!message || !scheduledTime) {
+      return res.status(400).json({ message: 'Message and scheduled time are required' });
+    }
+
+    let phoneNumbers = [];
+    let recipientNames = [];
+
+    // Collect from individual members
+    if (memberIds && memberIds.length > 0) {
+      const members = await Member.find({ _id: { $in: memberIds } }, 'phoneNumber firstName lastName');
+      members.forEach(m => {
+        if (m.phoneNumber && m.phoneNumber !== '-') {
+          phoneNumbers.push(m.phoneNumber);
+          recipientNames.push(`${m.firstName} ${m.lastName}`);
+        }
+      });
+    }
+
+    // Collect from groups
+    if (groupIds && groupIds.length > 0) {
+      const groups = await Group.find({ _id: { $in: groupIds } }).populate('members', 'phoneNumber firstName lastName');
+      groups.forEach(g => {
+        g.members.forEach(m => {
+          if (m.phoneNumber && m.phoneNumber !== '-') {
+            if (!phoneNumbers.includes(m.phoneNumber)) {
+              phoneNumbers.push(m.phoneNumber);
+              recipientNames.push(`${m.firstName} ${m.lastName}`);
+            }
+          }
+        });
+      });
+    }
+
+    if (phoneNumbers.length === 0) {
+      return res.status(400).json({ message: 'No valid phone numbers found for recipients' });
+    }
+
+    const scheduledSms = new ScheduledSMS({
+      recipients: phoneNumbers,
+      recipientNames: recipientNames.length > 5 ? `${recipientNames.slice(0, 5).join(', ')} and ${recipientNames.length - 5} others` : recipientNames.join(', '),
+      message,
+      scheduledTime: new Date(scheduledTime),
+      createdBy: req.user.id
+    });
+
+    await scheduledSms.save();
+    res.status(201).json(scheduledSms);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// Cancel a scheduled SMS
+app.delete('/api/scheduled-sms/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    await ScheduledSMS.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Scheduled SMS cancelled successfully' });
+  } catch (error) {
     res.status(500).json({ message: error.message });
   }
 });
