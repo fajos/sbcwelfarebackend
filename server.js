@@ -78,6 +78,21 @@ const calendarEventSchema = new mongoose.Schema({
 
 const CalendarEvent = mongoose.model('CalendarEvent', calendarEventSchema);
 
+// ========== ATTENDANCE SCHEMA ==========
+const attendanceSchema = new mongoose.Schema({
+  event: { type: mongoose.Schema.Types.ObjectId, ref: 'CalendarEvent', required: true },
+  eventDate: { type: Date, required: true }, // For recurring events, this is the instance date
+  member: { type: mongoose.Schema.Types.ObjectId, ref: 'Member', required: true },
+  status: { type: String, enum: ['present', 'absent', 'late'], default: 'present' },
+  markedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  markedAt: { type: Date, default: Date.now }
+});
+
+// Ensure a member can only be marked once for a specific event instance
+attendanceSchema.index({ event: 1, eventDate: 1, member: 1 }, { unique: true });
+
+const Attendance = mongoose.model('Attendance', attendanceSchema);
+
 // ========== MIDDLEWARE ==========
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -281,7 +296,7 @@ app.put('/api/members/:id', authenticateToken, checkRole(['admin', 'editor']), a
 });
 
 // DELETE single member (requires admin only)
-app.delete('/api/members/:id', authenticateToken, checkRole(['admin']), async (req, res) => {
+app.delete('/api/members/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
   try {
     const deletedMember = await Member.findByIdAndDelete(req.params.id);
     if (!deletedMember) return res.status(404).json({ message: 'Member not found' });
@@ -519,6 +534,7 @@ app.get('/api/calendar', authenticateToken, async (req, res) => {
     const endDate = new Date(end);
 
     const expandedEvents = expandRecurringEvents(events, startDate, endDate);
+    expandedEvents.sort((a, b) => new Date(a.eventDate) - new Date(b.eventDate));
     res.json(expandedEvents);
   } catch (error) {
     console.error('Error fetching events:', error);
@@ -535,7 +551,8 @@ app.get('/api/calendar/upcoming', authenticateToken, async (req, res) => {
     
     const events = await CalendarEvent.find({}).sort({ eventDate: 1 });
     const expandedEvents = expandRecurringEvents(events, today, thirtyDaysLater);
-    
+    expandedEvents.sort((a, b) => new Date(a.eventDate) - new Date(b.eventDate));
+
     res.json(expandedEvents);
   } catch (error) {
     console.error('Error fetching upcoming events:', error);
@@ -582,6 +599,137 @@ app.delete('/api/calendar/:id', authenticateToken, checkRole(['admin']), async (
     res.json({ message: 'Event deleted successfully' });
   } catch (error) {
     console.error('Error deleting event:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== ATTENDANCE ROUTES ==========
+
+// Mark attendance (multiple members)
+app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { eventId, eventDate, records } = req.body;
+
+    if (!eventId || !eventDate) {
+      return res.status(400).json({ message: 'eventId and eventDate are required' });
+    }
+
+    // Normalize date to ensure matching
+    const targetDate = new Date(eventDate);
+    const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+    // First, remove existing records for this instance to handle "deletions"
+    const deleteResult = await Attendance.deleteMany({
+      event: eventObjectId,
+      eventDate: targetDate
+    });
+
+    console.log(`Deleted ${deleteResult.deletedCount} old attendance records for ${eventId} on ${targetDate}`);
+
+    if (records && records.length > 0) {
+      const attendanceRecords = records.map(record => ({
+        event: eventObjectId,
+        eventDate: targetDate,
+        member: new mongoose.Types.ObjectId(record.memberId),
+        status: record.status || 'present',
+        markedBy: req.user.id,
+        markedAt: Date.now()
+      }));
+
+      await Attendance.insertMany(attendanceRecords);
+      console.log(`Inserted ${records.length} new attendance records`);
+    }
+
+    res.json({ message: 'Attendance updated successfully' });
+  } catch (error) {
+    console.error('Error marking attendance:', error);
+    res.status(500).json({ message: 'Failed to update attendance: ' + error.message });
+  }
+});
+
+// Get all attendance sessions (unique event instances with attendance)
+app.get('/api/attendance/sessions', authenticateToken, async (req, res) => {
+  try {
+    const sessions = await Attendance.aggregate([
+      {
+        $group: {
+          _id: {
+            event: "$event",
+            eventDate: "$eventDate"
+          },
+          presentCount: { $sum: 1 },
+          lastMarked: { $max: "$markedAt" }
+        }
+      },
+      {
+        $lookup: {
+          from: "calendarevents",
+          localField: "_id.event",
+          foreignField: "_id",
+          as: "eventDetails"
+        }
+      },
+      {
+        $unwind: {
+          path: "$eventDetails",
+          preserveNullAndEmptyArrays: false // Only show sessions for events that still exist
+        }
+      },
+      {
+        $project: {
+          _id: 0,
+          eventId: "$_id.event",
+          eventDate: "$_id.eventDate",
+          title: "$eventDetails.title",
+          eventType: "$eventDetails.eventType",
+          eventTime: "$eventDetails.eventTime",
+          location: "$eventDetails.location",
+          presentCount: 1,
+          lastMarked: 1
+        }
+      },
+      { $sort: { eventDate: -1 } }
+    ]);
+
+    res.json(sessions);
+  } catch (error) {
+    console.error('Error fetching attendance sessions:', error);
+    res.status(500).json({ message: 'Error loading attendance history: ' + error.message });
+  }
+});
+
+// Get attendance for an event instance
+app.get('/api/attendance', authenticateToken, async (req, res) => {
+  try {
+    const { eventId, eventDate } = req.query;
+    if (!eventId || !eventDate) {
+      return res.status(400).json({ message: 'eventId and eventDate are required' });
+    }
+
+    const targetDate = new Date(eventDate);
+    const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+    const attendance = await Attendance.find({
+      event: eventObjectId,
+      eventDate: targetDate
+    }).populate('member', 'firstName lastName');
+
+    res.json(attendance);
+  } catch (error) {
+    console.error('Error fetching attendance:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get attendance summary for a member
+app.get('/api/attendance/member/:memberId', authenticateToken, async (req, res) => {
+  try {
+    const attendance = await Attendance.find({ member: req.params.memberId })
+      .populate('event', 'title')
+      .sort({ eventDate: -1 });
+    res.json(attendance);
+  } catch (error) {
+    console.error('Error fetching member attendance:', error);
     res.status(500).json({ message: error.message });
   }
 });
