@@ -517,7 +517,7 @@ app.put('/api/members/:id', authenticateToken, checkRole(['admin', 'editor']), a
     const updatedMember = await Member.findByIdAndUpdate(
       req.params.id,
       { ...req.body, updatedAt: Date.now() },
-      { new: true, runValidators: true }
+      { returnDocument: 'after', runValidators: true }
     );
     if (!updatedMember) return res.status(404).json({ message: 'Member not found' });
     res.json(updatedMember);
@@ -628,7 +628,7 @@ app.put('/api/admin/users/:id', authenticateToken, checkRole(['admin']), async (
     const updatedUser = await User.findByIdAndUpdate(
       userId,
       { role },
-      { new: true, select: '-password' }
+      { returnDocument: 'after', select: '-password' }
     );
     
     if (!updatedUser) {
@@ -654,6 +654,72 @@ app.put('/api/admin/users/:id/reset-password', authenticateToken, checkRole(['ad
     res.json({ message: 'Password reset successfully' });
   } catch (error) {
     console.error('Error resetting password:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Test route to trigger celebration SMS (admin only)
+app.post('/api/admin/test-celebrations', authenticateToken, checkRole(['admin']), async (req, res) => {
+  console.log('🧪 Manual trigger of celebration SMS task...');
+  try {
+    const today = new Date();
+    const currentMonth = today.getMonth() + 1;
+    const currentDay = today.getDate();
+
+    const members = await Member.find({}, 'firstName lastName phoneNumber dateOfBirth weddingAnniversary');
+    let birthdayCount = 0;
+    let anniversaryCount = 0;
+    let errors = [];
+
+    for (const m of members) {
+      if (!m.phoneNumber || m.phoneNumber === '-') continue;
+
+      // Check Birthday
+      const dob = parseDateString(m.dateOfBirth);
+      if (dob && dob.month === currentMonth && dob.day === currentDay) {
+        const message = `Happy Birthday ${m.firstName} ${m.lastName}! We pray that God's grace and blessings be upon you today and always. Have a wonderful celebration! - C&S Saints Builder Church`;
+        const result = await sendSMS(m.phoneNumber, message);
+        if (result.success) birthdayCount++;
+        else errors.push(`Birthday SMS failed for ${m.firstName}: ${result.error}`);
+
+        await new SMSHistory({
+          recipients: [m.phoneNumber],
+          recipientNames: `${m.firstName} ${m.lastName}`,
+          message: message,
+          type: 'celebration',
+          status: result.success ? 'sent' : 'failed',
+          error: result.success ? null : result.error,
+          createdBy: req.user.id
+        }).save();
+      }
+
+      // Check Anniversary
+      const anniv = parseDateString(m.weddingAnniversary);
+      if (anniv && anniv.month === currentMonth && anniv.day === currentDay) {
+        const message = `Happy Wedding Anniversary ${m.firstName} ${m.lastName}! May your union continue to be blessed with love, joy, and peace. - C&S Saints Builder Church`;
+        const result = await sendSMS(m.phoneNumber, message);
+        if (result.success) anniversaryCount++;
+        else errors.push(`Anniversary SMS failed for ${m.firstName}: ${result.error}`);
+
+        await new SMSHistory({
+          recipients: [m.phoneNumber],
+          recipientNames: `${m.firstName} ${m.lastName}`,
+          message: message,
+          type: 'celebration',
+          status: result.success ? 'sent' : 'failed',
+          error: result.success ? null : result.error,
+          createdBy: req.user.id
+        }).save();
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Test completed. Sent ${birthdayCount} birthday and ${anniversaryCount} anniversary SMS.`,
+      errors: errors.length > 0 ? errors : undefined
+    });
+  } catch (error) {
+    console.error('Error in manual celebration test:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -778,9 +844,12 @@ app.get('/api/calendar', authenticateToken, async (req, res) => {
 app.get('/api/calendar/upcoming', authenticateToken, async (req, res) => {
   try {
     const today = new Date();
-    const thirtyDaysLater = new Date();
+    today.setHours(0, 0, 0, 0); // Start from beginning of today
+
+    const thirtyDaysLater = new Date(today);
     thirtyDaysLater.setDate(today.getDate() + 30);
-    
+    thirtyDaysLater.setHours(23, 59, 59, 999);
+
     const events = await CalendarEvent.find({}).sort({ eventDate: 1 });
     const expandedEvents = expandRecurringEvents(events, today, thirtyDaysLater);
     expandedEvents.sort((a, b) => new Date(a.eventDate) - new Date(b.eventDate));
@@ -813,7 +882,7 @@ app.put('/api/calendar/:id', authenticateToken, checkRole(['admin', 'editor']), 
     const updatedEvent = await CalendarEvent.findByIdAndUpdate(
       req.params.id,
       { ...req.body, updatedAt: Date.now() },
-      { new: true }
+      { returnDocument: 'after' }
     );
     if (!updatedEvent) return res.status(404).json({ message: 'Event not found' });
     res.json(updatedEvent);
@@ -1164,7 +1233,7 @@ app.put('/api/groups/:id', authenticateToken, checkRole(['admin', 'editor']), as
     const group = await Group.findByIdAndUpdate(
       req.params.id,
       { ...req.body, updatedAt: Date.now() },
-      { new: true }
+      { returnDocument: 'after' }
     );
     res.json(group);
   } catch (error) {
