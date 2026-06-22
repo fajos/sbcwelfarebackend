@@ -180,7 +180,7 @@ cron.schedule('* * * * *', async () => {
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true },
   password: { type: String, required: true },
-  role: { type: String, default: 'editor' }, // admin, editor, viewer
+  roles: { type: [String], default: ['editor'] }, // admin, editor, viewer, Executives
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -213,6 +213,25 @@ memberSchema.index({ completedFoundationClass: 1 });
 memberSchema.index({ phoneNumber: 1 });
 
 const Member = mongoose.model('Member', memberSchema);
+
+// ========== CHILD SCHEMA ==========
+const childSchema = new mongoose.Schema({
+  firstName: { type: String, required: true },
+  lastName: { type: String, required: true },
+  parentsName: { type: String, default: '' },
+  parentsPhoneNumber: { type: String, default: '' },
+  parentIds: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Member' }],
+  dateOfBirth: { type: String, default: '' },
+  class: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+childSchema.index({ firstName: 1, lastName: 1 });
+childSchema.index({ parentsPhoneNumber: 1 });
+childSchema.index({ parentIds: 1 });
+
+const Child = mongoose.model('Child', childSchema);
 
 // ========== CALENDAR SCHEMA ==========
 const calendarEventSchema = new mongoose.Schema({
@@ -249,16 +268,18 @@ const CalendarEvent = mongoose.model('CalendarEvent', calendarEventSchema);
 const attendanceSchema = new mongoose.Schema({
   event: { type: mongoose.Schema.Types.ObjectId, ref: 'CalendarEvent', required: true },
   eventDate: { type: Date, required: true }, // For recurring events, this is the instance date
-  member: { type: mongoose.Schema.Types.ObjectId, ref: 'Member', required: true },
+  member: { type: mongoose.Schema.Types.ObjectId, ref: 'Member' },
+  child: { type: mongoose.Schema.Types.ObjectId, ref: 'Child' },
   status: { type: String, enum: ['present', 'absent', 'late'], default: 'present' },
   markedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
   markedAt: { type: Date, default: Date.now }
 });
 
-// Ensure a member can only be marked once for a specific event instance
-attendanceSchema.index({ event: 1, eventDate: 1, member: 1 }, { unique: true });
+// Ensure a member or child can only be marked once for a specific event instance
+attendanceSchema.index({ event: 1, eventDate: 1, member: 1, child: 1 }, { unique: true });
 attendanceSchema.index({ eventDate: -1 });
 attendanceSchema.index({ member: 1 });
+attendanceSchema.index({ child: 1 });
 
 const Attendance = mongoose.model('Attendance', attendanceSchema);
 
@@ -273,6 +294,19 @@ const groupSchema = new mongoose.Schema({
 });
 
 const Group = mongoose.model('Group', groupSchema);
+
+// ========== MINUTES OF MEETING SCHEMA ==========
+const minutesOfMeetingSchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  content: { type: String, default: '' },
+  meetingDate: { type: Date, default: Date.now },
+  attendees: [String],
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+
+const MinutesOfMeeting = mongoose.model('MinutesOfMeeting', minutesOfMeetingSchema);
 
 // ========== SCHEDULED SMS SCHEMA ==========
 const scheduledSMSSchema = new mongoose.Schema({
@@ -323,7 +357,14 @@ const authenticateToken = (req, res, next) => {
 
 const checkRole = (allowedRoles) => {
   return (req, res, next) => {
-    if (!allowedRoles.includes(req.user.role)) {
+    // Support both the new roles array and the legacy role string
+    const userRoles = Array.isArray(req.user.roles)
+      ? req.user.roles
+      : (req.user.role ? [req.user.role] : []);
+
+    const hasPermission = allowedRoles.some(role => userRoles.includes(role));
+
+    if (!hasPermission) {
       return res.status(403).json({ message: 'You do not have permission to perform this action.' });
     }
     next();
@@ -414,9 +455,19 @@ app.post('/api/auth/login', async (req, res) => {
     if (!isValidPassword) {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
+
+    // Safety check: Ensure 'admin' user always has 'admin' role
+    // This fixes cases where the admin user might have been downgraded or lost roles during migration
+    if (user.username === 'admin') {
+      const currentRoles = Array.isArray(user.roles) ? user.roles : (user.roles ? [user.roles] : []);
+      if (!currentRoles.includes('admin')) {
+        user.roles = [...currentRoles, 'admin'];
+        await user.save();
+      }
+    }
     
     const token = jwt.sign(
-      { id: user._id, username: user.username, role: user.role },
+      { id: user._id, username: user.username, roles: user.roles },
       process.env.JWT_SECRET || 'your_secret_key',
       { expiresIn: '7d' }
     );
@@ -426,7 +477,7 @@ app.post('/api/auth/login', async (req, res) => {
       user: {
         id: user._id,
         username: user.username,
-        role: user.role
+        roles: user.roles
       }
     });
   } catch (error) {
@@ -435,9 +486,36 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
-// Verify token
-app.get('/api/auth/verify', authenticateToken, (req, res) => {
-  res.json({ valid: true, user: req.user });
+// Verify token - Now fetches fresh user data from DB and enforces admin role
+app.get('/api/auth/verify', authenticateToken, async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id).select('-password');
+    if (!user) {
+      return res.status(404).json({ valid: false, message: 'User not found' });
+    }
+
+    // Safety check: Ensure 'admin' user always has 'admin' role
+    if (user.username === 'admin') {
+      const currentRoles = Array.isArray(user.roles) ? user.roles : (user.roles ? [user.roles] : []);
+      if (!currentRoles.includes('admin')) {
+        console.log('Restoring admin role to admin user during verification');
+        user.roles = [...currentRoles, 'admin'];
+        await user.save();
+      }
+    }
+
+    // Generate a fresh token with current roles to prevent staleness
+    const freshToken = jwt.sign(
+      { id: user._id, username: user.username, roles: user.roles },
+      process.env.JWT_SECRET || 'your_secret_key',
+      { expiresIn: '7d' }
+    );
+
+    res.json({ valid: true, user: user, token: freshToken });
+  } catch (error) {
+    console.error('Verify error:', error);
+    res.status(500).json({ valid: false, message: 'Server error' });
+  }
 });
 
 // Create first admin user (run once, then comment out)
@@ -452,7 +530,7 @@ app.post('/api/auth/setup', async (req, res) => {
     const admin = new User({
       username: 'admin',
       password: hashedPassword,
-      role: 'admin'
+      roles: ['admin']
     });
     
     await admin.save();
@@ -460,6 +538,66 @@ app.post('/api/auth/setup', async (req, res) => {
   } catch (error) {
     console.error('Setup error:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ========== CHILD ROUTES (Protected) ==========
+
+// GET all children
+app.get('/api/children', authenticateToken, async (req, res) => {
+  try {
+    const children = await Child.find().populate('parentIds', 'firstName lastName phoneNumber').sort({ createdAt: -1 });
+    res.json(children);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// POST new child
+app.post('/api/children', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const child = new Child(req.body);
+    const savedChild = await child.save();
+    res.status(201).json(savedChild);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// GET single child
+app.get('/api/children/:id', authenticateToken, async (req, res) => {
+  try {
+    const child = await Child.findById(req.params.id);
+    if (!child) return res.status(404).json({ message: 'Child not found' });
+    res.json(child);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// PUT update child
+app.put('/api/children/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const updatedChild = await Child.findByIdAndUpdate(
+      req.params.id,
+      { ...req.body, updatedAt: Date.now() },
+      { returnDocument: 'after', runValidators: true }
+    );
+    if (!updatedChild) return res.status(404).json({ message: 'Child not found' });
+    res.json(updatedChild);
+  } catch (error) {
+    res.status(400).json({ message: error.message });
+  }
+});
+
+// DELETE single child
+app.delete('/api/children/:id', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const deletedChild = await Child.findByIdAndDelete(req.params.id);
+    if (!deletedChild) return res.status(404).json({ message: 'Child not found' });
+    res.json({ message: 'Child deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
   }
 });
 
@@ -588,7 +726,7 @@ app.get('/api/admin/users', authenticateToken, checkRole(['admin']), async (req,
 // Create new user (super admin only)
 app.post('/api/admin/users', authenticateToken, checkRole(['admin']), async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, roles } = req.body;
     
     // Check if user exists
     const existingUser = await User.findOne({ username });
@@ -600,13 +738,13 @@ app.post('/api/admin/users', authenticateToken, checkRole(['admin']), async (req
     const newUser = new User({
       username,
       password: hashedPassword,
-      role: role || 'viewer'
+      roles: roles || ['viewer']
     });
     
     await newUser.save();
     res.status(201).json({ 
       message: 'User created successfully',
-      user: { id: newUser._id, username: newUser.username, role: newUser.role }
+      user: { id: newUser._id, username: newUser.username, roles: newUser.roles }
     });
   } catch (error) {
     console.error('Error creating user:', error);
@@ -614,20 +752,20 @@ app.post('/api/admin/users', authenticateToken, checkRole(['admin']), async (req
   }
 });
 
-// Update user role (super admin only)
+// Update user roles (super admin only)
 app.put('/api/admin/users/:id', authenticateToken, checkRole(['admin']), async (req, res) => {
   try {
-    const { role } = req.body;
+    const { roles } = req.body;
     const userId = req.params.id;
     
     // Prevent changing own role
     if (userId === req.user.id) {
-      return res.status(400).json({ message: 'Cannot change your own role' });
+      return res.status(400).json({ message: 'Cannot change your own roles' });
     }
     
     const updatedUser = await User.findByIdAndUpdate(
       userId,
-      { role },
+      { roles },
       { returnDocument: 'after', select: '-password' }
     );
     
@@ -635,7 +773,7 @@ app.put('/api/admin/users/:id', authenticateToken, checkRole(['admin']), async (
       return res.status(404).json({ message: 'User not found' });
     }
     
-    res.json({ message: 'User role updated successfully', user: updatedUser });
+    res.json({ message: 'User roles updated successfully', user: updatedUser });
   } catch (error) {
     console.error('Error updating user:', error);
     res.status(500).json({ message: error.message });
@@ -649,7 +787,7 @@ app.put('/api/admin/users/:id/reset-password', authenticateToken, checkRole(['ad
     const userId = req.params.id;
     
     const hashedPassword = await bcrypt.hash(newPassword, 10);
-    await User.findByIdAndUpdate(userId, { password: hashedPassword });
+    await User.findByIdAndUpdate(userId, { password: hashedPassword }, { returnDocument: 'after' });
     
     res.json({ message: 'Password reset successfully' });
   } catch (error) {
@@ -906,7 +1044,7 @@ app.delete('/api/calendar/:id', authenticateToken, checkRole(['admin']), async (
 
 // ========== ATTENDANCE ROUTES ==========
 
-// Mark attendance (multiple members)
+// Mark attendance (multiple members/children)
 app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
   try {
     const { eventId, eventDate, records } = req.body;
@@ -931,7 +1069,8 @@ app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor'
       const attendanceRecords = records.map(record => ({
         event: eventObjectId,
         eventDate: targetDate,
-        member: new mongoose.Types.ObjectId(record.memberId),
+        member: record.memberId ? new mongoose.Types.ObjectId(record.memberId) : undefined,
+        child: record.childId ? new mongoose.Types.ObjectId(record.childId) : undefined,
         status: record.status || 'present',
         markedBy: req.user.id,
         markedAt: Date.now()
@@ -948,7 +1087,7 @@ app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor'
   }
 });
 
-// Get all attendance sessions (unique event instances with attendance)
+// GET all attendance sessions (unique event instances with attendance)
 app.get('/api/attendance/sessions', authenticateToken, async (req, res) => {
   try {
     const sessions = await Attendance.aggregate([
@@ -959,6 +1098,8 @@ app.get('/api/attendance/sessions', authenticateToken, async (req, res) => {
             eventDate: "$eventDate"
           },
           presentCount: { $sum: 1 },
+          memberCount: { $sum: { $cond: [{ $ifNull: ["$member", false] }, 1, 0] } },
+          childCount: { $sum: { $cond: [{ $ifNull: ["$child", false] }, 1, 0] } },
           lastMarked: { $max: "$markedAt" }
         }
       },
@@ -986,6 +1127,8 @@ app.get('/api/attendance/sessions', authenticateToken, async (req, res) => {
           eventTime: "$eventDetails.eventTime",
           location: "$eventDetails.location",
           presentCount: 1,
+          memberCount: 1,
+          childCount: 1,
           lastMarked: 1
         }
       },
@@ -1013,7 +1156,7 @@ app.get('/api/attendance', authenticateToken, async (req, res) => {
     const attendance = await Attendance.find({
       event: eventObjectId,
       eventDate: targetDate
-    }).populate('member', 'firstName lastName');
+    }).populate('member', 'firstName lastName').populate('child', 'firstName lastName');
 
     res.json(attendance);
   } catch (error) {
@@ -1031,6 +1174,19 @@ app.get('/api/attendance/member/:memberId', authenticateToken, async (req, res) 
     res.json(attendance);
   } catch (error) {
     console.error('Error fetching member attendance:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Get attendance summary for a child
+app.get('/api/attendance/child/:childId', authenticateToken, async (req, res) => {
+  try {
+    const attendance = await Attendance.find({ child: req.params.childId })
+      .populate('event', 'title eventType eventTime location')
+      .sort({ eventDate: -1 });
+    res.json(attendance);
+  } catch (error) {
+    console.error('Error fetching child attendance:', error);
     res.status(500).json({ message: error.message });
   }
 });
@@ -1059,6 +1215,8 @@ app.get('/api/reports/attendance-trends', authenticateToken, async (req, res) =>
             month: { $month: "$eventDate" }
           },
           totalAttendance: { $sum: 1 },
+          memberAttendance: { $sum: { $cond: [{ $ifNull: ["$member", false] }, 1, 0] } },
+          childAttendance: { $sum: { $cond: [{ $ifNull: ["$child", false] }, 1, 0] } },
           sessionsCount: { $addToSet: { event: "$event", date: "$eventDate" } }
         }
       },
@@ -1068,6 +1226,8 @@ app.get('/api/reports/attendance-trends', authenticateToken, async (req, res) =>
           year: "$_id.year",
           month: "$_id.month",
           totalAttendance: 1,
+          memberAttendance: 1,
+          childAttendance: 1,
           avgAttendance: {
             $cond: [
               { $gt: [{ $size: "$sessionsCount" }, 0] },
@@ -1092,6 +1252,7 @@ app.get('/api/reports/attendance-trends', authenticateToken, async (req, res) =>
 app.get('/api/reports/demographics', authenticateToken, async (req, res) => {
   try {
     const totalMembers = await Member.countDocuments();
+    const totalChildren = await Child.countDocuments();
 
     const genderStats = await Member.aggregate([
       { $group: { _id: "$gender", count: { $sum: 1 } } }
@@ -1108,15 +1269,22 @@ app.get('/api/reports/demographics', authenticateToken, async (req, res) => {
     const unitStats = await Member.aggregate([
       { $group: { _id: "$churchUnit", count: { $sum: 1 } } },
       { $sort: { count: -1 } },
-      { $limit: 15 } // Limit to top 15 units to avoid cluttered charts
+      { $limit: 15 }
+    ]);
+
+    const childClassStats = await Child.aggregate([
+      { $group: { _id: "$class", count: { $sum: 1 } } },
+      { $sort: { count: -1 } }
     ]);
 
     res.json({
       totalMembers,
+      totalChildren,
       genderStats,
       maritalStats,
       foundationClassStats,
-      unitStats
+      unitStats,
+      childClassStats
     });
   } catch (error) {
     console.error('Error fetching demographics:', error);
@@ -1387,6 +1555,71 @@ app.get('/api/sms-history', authenticateToken, async (req, res) => {
     const history = await SMSHistory.find().sort({ sentAt: -1 }).limit(100);
     res.json(history);
   } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// ========== MINUTES OF MEETING ROUTES ==========
+
+// Get all minutes
+app.get('/api/minutes', authenticateToken, checkRole(['admin', 'Executives']), async (req, res) => {
+  try {
+    const minutes = await MinutesOfMeeting.find().sort({ meetingDate: -1 }).populate('createdBy', 'username');
+    res.json(minutes);
+  } catch (error) {
+    console.error('Error fetching minutes:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Create new minutes
+app.post('/api/minutes', authenticateToken, checkRole(['admin', 'Executives']), async (req, res) => {
+  try {
+    const { title, content, meetingDate, attendees } = req.body;
+    const newMinutes = new MinutesOfMeeting({
+      title,
+      content,
+      meetingDate: meetingDate || Date.now(),
+      attendees,
+      createdBy: req.user.id
+    });
+    await newMinutes.save();
+    res.status(201).json(newMinutes);
+  } catch (error) {
+    console.error('Error creating minutes:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Update minutes
+app.put('/api/minutes/:id', authenticateToken, checkRole(['admin', 'Executives']), async (req, res) => {
+  try {
+    const { title, content, meetingDate, attendees } = req.body;
+    const updatedMinutes = await MinutesOfMeeting.findByIdAndUpdate(
+      req.params.id,
+      { title, content, meetingDate, attendees, updatedAt: Date.now() },
+      { returnDocument: 'after' }
+    );
+    if (!updatedMinutes) {
+      return res.status(404).json({ message: 'Minutes not found' });
+    }
+    res.json(updatedMinutes);
+  } catch (error) {
+    console.error('Error updating minutes:', error);
+    res.status(500).json({ message: error.message });
+  }
+});
+
+// Delete minutes
+app.delete('/api/minutes/:id', authenticateToken, checkRole(['admin', 'Executives']), async (req, res) => {
+  try {
+    const deletedMinutes = await MinutesOfMeeting.findByIdAndDelete(req.params.id);
+    if (!deletedMinutes) {
+      return res.status(404).json({ message: 'Minutes not found' });
+    }
+    res.json({ message: 'Minutes deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting minutes:', error);
     res.status(500).json({ message: error.message });
   }
 });
