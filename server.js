@@ -456,12 +456,11 @@ app.post('/api/auth/login', async (req, res) => {
       return res.status(401).json({ message: 'Invalid username or password' });
     }
 
-    // Safety check: Ensure 'admin' user always has 'admin' role
-    // This fixes cases where the admin user might have been downgraded or lost roles during migration
+    // Safety check: Ensure 'admin' user strictly has 'admin' role
     if (user.username === 'admin') {
       const currentRoles = Array.isArray(user.roles) ? user.roles : (user.roles ? [user.roles] : []);
-      if (!currentRoles.includes('admin')) {
-        user.roles = [...currentRoles, 'admin'];
+      if (currentRoles.length !== 1 || currentRoles[0] !== 'admin') {
+        user.roles = ['admin'];
         await user.save();
       }
     }
@@ -494,12 +493,12 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
       return res.status(404).json({ valid: false, message: 'User not found' });
     }
 
-    // Safety check: Ensure 'admin' user always has 'admin' role
+    // Safety check: Ensure 'admin' user strictly has 'admin' role
     if (user.username === 'admin') {
       const currentRoles = Array.isArray(user.roles) ? user.roles : (user.roles ? [user.roles] : []);
-      if (!currentRoles.includes('admin')) {
-        console.log('Restoring admin role to admin user during verification');
-        user.roles = [...currentRoles, 'admin'];
+      if (currentRoles.length !== 1 || currentRoles[0] !== 'admin') {
+        console.log('Enforcing single admin role for admin user');
+        user.roles = ['admin'];
         await user.save();
       }
     }
