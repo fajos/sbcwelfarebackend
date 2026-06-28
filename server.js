@@ -1086,6 +1086,30 @@ app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor'
   }
 });
 
+// DELETE an entire attendance session
+app.delete('/api/attendance/session', authenticateToken, checkRole(['admin', 'editor']), async (req, res) => {
+  try {
+    const { eventId, eventDate } = req.query;
+    if (!eventId || !eventDate) {
+      return res.status(400).json({ message: 'eventId and eventDate are required' });
+    }
+
+    const targetDate = new Date(eventDate);
+    const eventObjectId = new mongoose.Types.ObjectId(eventId);
+
+    const result = await Attendance.deleteMany({
+      event: eventObjectId,
+      eventDate: targetDate
+    });
+
+    console.log(`Deleted ${result.deletedCount} attendance records for ${eventId} on ${targetDate}`);
+    res.json({ message: 'Attendance session deleted successfully', deletedCount: result.deletedCount });
+  } catch (error) {
+    console.error('Error deleting attendance session:', error);
+    res.status(500).json({ message: 'Failed to delete attendance: ' + error.message });
+  }
+});
+
 // GET all attendance sessions (unique event instances with attendance)
 app.get('/api/attendance/sessions', authenticateToken, async (req, res) => {
   try {
