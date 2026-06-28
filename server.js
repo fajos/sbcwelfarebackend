@@ -17,7 +17,17 @@ app.use(express.json());
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/saints_welfare';
 
 mongoose.connect(MONGODB_URI)
-  .then(() => console.log('✅ Connected to MongoDB'))
+  .then(async () => {
+    console.log('✅ Connected to MongoDB');
+    // Drop all indexes on Attendance collection to ensure they match current schema
+    try {
+      await mongoose.connection.db.collection('attendances').dropIndexes();
+      console.log('🧹 Attendance indexes reset successfully');
+    } catch (err) {
+      // Index drop might fail if collection doesn't exist yet, which is fine
+      console.log('ℹ️ Note on Attendance indexes:', err.message);
+    }
+  })
   .catch(err => console.error('❌ MongoDB connection error:', err));
 
 // Function to parse date strings into {month, day}
@@ -1065,18 +1075,24 @@ app.post('/api/attendance/bulk', authenticateToken, checkRole(['admin', 'editor'
     console.log(`Deleted ${deleteResult.deletedCount} old attendance records for ${eventId} on ${targetDate}`);
 
     if (records && records.length > 0) {
-      const attendanceRecords = records.map(record => ({
-        event: eventObjectId,
-        eventDate: targetDate,
-        member: record.memberId ? new mongoose.Types.ObjectId(record.memberId) : undefined,
-        child: record.childId ? new mongoose.Types.ObjectId(record.childId) : undefined,
-        status: record.status || 'present',
-        markedBy: req.user.id,
-        markedAt: Date.now()
-      }));
+      const attendanceRecords = records.map(record => {
+        const entry = {
+          event: eventObjectId,
+          eventDate: targetDate,
+          status: record.status || 'present',
+          markedBy: req.user.id || req.user._id,
+          markedAt: Date.now()
+        };
 
+        if (record.memberId) entry.member = new mongoose.Types.ObjectId(record.memberId);
+        if (record.childId) entry.child = new mongoose.Types.ObjectId(record.childId);
+
+        return entry;
+      });
+
+      console.log(`Preparing to insert ${attendanceRecords.length} records...`);
       await Attendance.insertMany(attendanceRecords);
-      console.log(`Inserted ${records.length} new attendance records`);
+      console.log(`Successfully inserted records`);
     }
 
     res.json({ message: 'Attendance updated successfully' });
